@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "parity-check"
+version = "0.1.0"
+description = "Proves two database engines return the same answers, per partition."
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+where = ["src"]
