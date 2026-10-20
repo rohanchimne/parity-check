@@ -1,6 +1,14 @@
 from parity.adapters import get_adapter
 from parity.checks import FAIL, PASS, check_row_count, daily_row_counts
 
+from pathlib import Path
+
+from parity.adapters import get_adapter
+from parity.checks import (
+    FAIL, PASS, check_row_count, check_schema, daily_row_counts, load_type_map,
+)
+
+TYPE_MAPS = Path(__file__).resolve().parent.parent / "configs" / "type_maps"
 
 # Pure tests: hand-made dicts, no database, run in milliseconds
 
@@ -55,3 +63,47 @@ def test_timezone_bug_fails_and_names_the_extra_day(timezone_dbs):
     last = results[-1]
     assert last.partition == "2026-04-01"
     assert last.details == "partition only in target"
+
+# Schema check: pure tests
+
+TYPE_MAP = {"INTEGER": ["BIGINT"], "NUMERIC": ["DECIMAL(18,2)"]}
+
+
+def col(name, col_type, nullable=False):
+    return {"name": name, "type": col_type, "nullable": nullable}
+
+
+def test_allowed_type_passes():
+    [r] = check_schema([col("id", "INTEGER")], [col("id", "BIGINT")], TYPE_MAP)
+    assert r.status == PASS
+
+
+def test_disallowed_type_fails_and_names_both_types():
+    [r] = check_schema([col("revenue", "NUMERIC")], [col("revenue", "DOUBLE")], TYPE_MAP)
+    assert r.status == FAIL
+    assert r.details == "NUMERIC -> DOUBLE not allowed by type map"
+
+
+def test_missing_and_extra_columns_are_named():
+    results = check_schema([col("a", "INTEGER")], [col("b", "BIGINT")], TYPE_MAP)
+    assert [(r.metric, r.details) for r in results] == [
+        ("a", "column missing in target"),
+        ("b", "column only in target"),
+    ]
+
+
+def test_nullability_mismatch_fails_only_when_required():
+    src, tgt = [col("id", "INTEGER", False)], [col("id", "BIGINT", True)]
+    assert check_schema(src, tgt, TYPE_MAP)[0].status == FAIL
+    assert check_schema(src, tgt, TYPE_MAP, require_nullability_match=False)[0].status == PASS
+
+
+# Schema check: real databases and the real type map
+
+def test_clean_schemas_pass_with_real_type_map(clean_dbs):
+    source, target = clean_dbs
+    src = get_adapter({"engine": "sqlite", "path": source}).schema("orders")
+    tgt = get_adapter({"engine": "duckdb", "path": target}).schema("orders")
+    results = check_schema(src, tgt, load_type_map("sqlite_to_duckdb", TYPE_MAPS))
+    assert len(results) == 8
+    assert all(r.status == PASS for r in results)
