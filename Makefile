@@ -1,7 +1,11 @@
 .PHONY: demo test clean
 
 demo:
-	@echo "demo: not built yet"
+	python scripts/generate_data.py
+	python -m parity run configs/orders.yaml
+	python scripts/generate_data.py --inject timezone
+	-python -m parity run configs/orders.yaml
+	python scripts/generate_data.py
 
 test:
 	python -m pytest
