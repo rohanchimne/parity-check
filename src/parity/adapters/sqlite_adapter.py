@@ -3,7 +3,7 @@
 import sqlite3
 
 from .base import Adapter
-
+from ..profile import build_profile_sql
 
 class SQLiteAdapter(Adapter):
 
@@ -27,7 +27,8 @@ class SQLiteAdapter(Adapter):
         ]
 
     def profile(self, table, partition_col, metrics, by=None):
-        raise NotImplementedError("built in Phase 2, part 3")
-
+        # SQLite stores dates as 'YYYY-MM-DD' text already
+        return self.query(build_profile_sql(table, partition_col, metrics, by))
+    
     def fingerprint_expr(self, columns):
         raise NotImplementedError("built in Phase 4")

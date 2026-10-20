@@ -3,7 +3,7 @@
 import duckdb
 
 from .base import Adapter
-
+from ..profile import build_profile_sql
 
 class DuckDBAdapter(Adapter):
 
@@ -31,8 +31,11 @@ class DuckDBAdapter(Adapter):
             for name, col_type, nullable in rows
         ]
 
+
     def profile(self, table, partition_col, metrics, by=None):
-        raise NotImplementedError("built in Phase 2, part 3")
+        # DuckDB returns dates as date objects; render them as text like SQLite
+        partition_expr = f"strftime({partition_col}, '%Y-%m-%d')"
+        return self.query(build_profile_sql(table, partition_expr, metrics, by))
 
     def fingerprint_expr(self, columns):
         raise NotImplementedError("built in Phase 4")
