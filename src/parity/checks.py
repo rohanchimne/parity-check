@@ -1,8 +1,7 @@
 """Compare source and target. Every check returns a list of CheckResult rows."""
 
 from dataclasses import dataclass
-
-from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 
 import yaml
@@ -78,4 +77,64 @@ def check_schema(src_cols, tgt_cols, type_map, require_nullability_match=True):
         results.append(CheckResult(
             "schema", None, name, s and s["type"], t and t["type"], status, details,
         ))
+    return results
+
+def to_decimal(value):
+    """Exact Decimal from whatever the engine returned (int, float, Decimal)."""
+    return value if isinstance(value, Decimal) else Decimal(str(value))
+
+
+def rounded(value, scale):
+    """Round to `scale` decimal places (2 -> 0.01). No scale: leave as is."""
+    value = to_decimal(value)
+    return value if scale is None else value.quantize(Decimal(1).scaleb(-scale))
+
+
+def within(src, tgt, tolerance, scale=None):
+    """True if tgt is close enough to src. Pure, exact, never compares floats."""
+    s, t = rounded(src, scale), rounded(tgt, scale)
+    if tolerance == "exact":
+        return s == t
+    if s == 0:
+        return t == 0
+    return abs(t - s) / abs(s) <= Decimal(str(tolerance))
+
+
+def describe_difference(src, tgt, scale=None):
+    """'-99,107.07 (-38.99%)': the change from source to target."""
+    s, t = rounded(src, scale), rounded(tgt, scale)
+    diff = t - s
+    pct = f" ({diff / s:+.2%})" if s != 0 else ""
+    return f"{diff:+,}{pct}"
+
+
+def profile_to_dict(profile):
+    """Long profile DataFrame -> {(partition, dimension, metric): value}."""
+    out = {}
+    for row in profile.itertuples(index=False):
+        dimension = row.dimension if isinstance(row.dimension, str) else None
+        out[(row.partition, dimension, row.metric)] = row.value
+    return out
+
+
+def check_metrics(src_profile, tgt_profile, metrics):
+    """Compare every metric, per partition and dimension, with its own tolerance."""
+    by_name = {m["name"]: m for m in metrics}
+    src, tgt = profile_to_dict(src_profile), profile_to_dict(tgt_profile)
+    results = []
+    keys = sorted(set(src) | set(tgt), key=lambda k: (k[0], k[1] or "", k[2]))
+    for partition, dimension, name in keys:
+        m = by_name[name]
+        s = src.get((partition, dimension, name))
+        t = tgt.get((partition, dimension, name))
+        label = name if dimension is None else f"{name} [{dimension}]"
+        if s is None:
+            status, details = FAIL, "partition only in target"
+        elif t is None:
+            status, details = FAIL, "partition only in source"
+        elif within(s, t, m["tolerance"], m.get("scale")):
+            status, details = PASS, ""
+        else:
+            status, details = FAIL, describe_difference(s, t, m.get("scale"))
+        results.append(CheckResult("metric", partition, label, s, t, status, details))
     return results
