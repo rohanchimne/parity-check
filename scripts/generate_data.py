@@ -7,6 +7,10 @@ import duckdb
 import numpy as np
 import pandas as pd
 
+import argparse
+import sqlite3
+from pathlib import Path
+
 SEED = 42
 START_DATE = "2026-01-01"
 DAYS = 90
@@ -15,6 +19,10 @@ BASE_ORDERS_PER_DAY = 5_000
 DATA_DIR = Path("data")
 SOURCE_PATH = DATA_DIR / "source.db"
 TARGET_PATH = DATA_DIR / "target.db"
+
+# The bug: naive local times read as UTC, then shifted by this offset
+TZ_OFFSET_MINUTES = 330        # +5h30m
+INJECT_CHOICES = ["none", "timezone"]
 
 # Relative order volume by day of week: Monday=0 ... Sunday=6
 DAY_OF_WEEK_FACTOR = [0.90, 0.90, 0.95, 1.00, 1.15, 1.35, 1.25]
@@ -111,10 +119,16 @@ def write_source(df: pd.DataFrame, path: Path) -> None:
     con.close()
 
 
-def write_target(df: pd.DataFrame, path: Path) -> None:
+def write_target(df: pd.DataFrame, path: Path, inject: str = "none") -> None:
     """The new warehouse: DuckDB, with real TIMESTAMP, DATE and DECIMAL types."""
     path.unlink(missing_ok=True)
     Path(f"{path}.wal").unlink(missing_ok=True)
+
+    # How the target derives its partition date. The timezone bug lives here.
+    date_expr = "CAST(order_ts AS DATE)"
+    if inject == "timezone":
+        date_expr = f"CAST(order_ts + INTERVAL '{TZ_OFFSET_MINUTES} minutes' AS DATE)"
+
     con = duckdb.connect(str(path))
     con.register("orders_df", df.assign(revenue_text=cents_to_text(df["revenue_cents"])))
     con.execute("""
@@ -129,12 +143,12 @@ def write_target(df: pd.DataFrame, path: Path) -> None:
             region      VARCHAR NOT NULL
         )
     """)
-    con.execute("""
+    con.execute(f"""
         INSERT INTO orders
         SELECT order_id,
                customer_id,
                order_ts,
-               CAST(order_ts AS DATE),
+               {date_expr},
                CAST(revenue_text AS DECIMAL(18,2)),
                quantity, status, region
         FROM orders_df
@@ -144,11 +158,20 @@ def write_target(df: pd.DataFrame, path: Path) -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Generate source and target orders databases.")
+    parser.add_argument(
+        "--inject",
+        choices=INJECT_CHOICES,
+        default="none",
+        help="which bug to inject into the target (default: none)",
+    )
+    args = parser.parse_args()
+
     df = build_orders()
     DATA_DIR.mkdir(exist_ok=True)
     write_source(df, SOURCE_PATH)
-    write_target(df, TARGET_PATH)
-    print(f"wrote {len(df):,} orders to {SOURCE_PATH} and {TARGET_PATH}")
+    write_target(df, TARGET_PATH, inject=args.inject)
+    print(f"wrote {len(df):,} orders to {SOURCE_PATH} and {TARGET_PATH} (inject={args.inject})")
 
 
 if __name__ == "__main__":
