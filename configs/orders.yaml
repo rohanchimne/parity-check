@@ -37,6 +37,7 @@ checks:
     - name: avg_order_value
       expr: "SUM(revenue) / COUNT(*)"
       tolerance: 0.001
+      scale: 2
       by: [region]
 
   freshness:
