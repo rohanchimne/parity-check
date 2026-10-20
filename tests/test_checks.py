@@ -1,16 +1,22 @@
-from parity.adapters import get_adapter
-from parity.checks import FAIL, PASS, check_row_count, daily_row_counts
-
+from decimal import Decimal
 from pathlib import Path
+
+import pandas as pd
 
 from parity.adapters import get_adapter
 from parity.checks import (
-    FAIL, PASS, check_row_count, check_schema, daily_row_counts, load_type_map,
+    FAIL, PASS, check_metrics, check_row_count, check_schema,
+    daily_row_counts, load_type_map,
 )
+from parity.config import load_config
+from parity.profile import run_profile
 
-TYPE_MAPS = Path(__file__).resolve().parent.parent / "configs" / "type_maps"
+ROOT = Path(__file__).resolve().parent.parent
+TYPE_MAPS = ROOT / "configs" / "type_maps"
+ORDERS = ROOT / "configs" / "orders.yaml"
 
-# Pure tests: hand-made dicts, no database, run in milliseconds
+
+# Row count check: pure tests
 
 def test_matching_counts_pass():
     results = check_row_count({"2026-01-01": 10}, {"2026-01-01": 10})
@@ -41,7 +47,7 @@ def test_results_are_sorted_by_partition():
     assert [r.partition for r in results] == ["2026-01-01", "2026-01-02"]
 
 
-# Integration tests: the real databases from conftest.py
+# Row count check: real databases
 
 def run_row_count(dbs):
     source, target = dbs
@@ -63,6 +69,7 @@ def test_timezone_bug_fails_and_names_the_extra_day(timezone_dbs):
     last = results[-1]
     assert last.partition == "2026-04-01"
     assert last.details == "partition only in target"
+
 
 # Schema check: pure tests
 
@@ -107,3 +114,55 @@ def test_clean_schemas_pass_with_real_type_map(clean_dbs):
     results = check_schema(src, tgt, load_type_map("sqlite_to_duckdb", TYPE_MAPS))
     assert len(results) == 8
     assert all(r.status == PASS for r in results)
+
+
+# Metric checks: pure tests
+
+METRICS = [
+    {"name": "total_revenue", "expr": "SUM(revenue)", "tolerance": "exact", "scale": 2},
+    {"name": "avg_order_value", "expr": "x", "tolerance": 0.001, "scale": 2, "by": ["region"]},
+]
+
+
+def profile(rows):
+    return pd.DataFrame(rows, columns=["partition", "dimension", "metric", "value"], dtype=object)
+
+
+def test_float_revenue_matches_exact_decimal():
+    src = profile([["2026-01-01", None, "total_revenue", 254199.72999999998]])
+    tgt = profile([["2026-01-01", None, "total_revenue", Decimal("254199.73")]])
+    [r] = check_metrics(src, tgt, METRICS)
+    assert r.status == PASS
+
+
+def test_metric_one_sided_partition_and_dimension_label():
+    src = profile([])
+    tgt = profile([["2026-04-01", "region=west", "avg_order_value", 50.0]])
+    [r] = check_metrics(src, tgt, METRICS)
+    assert r.metric == "avg_order_value [region=west]"
+    assert r.details == "partition only in target"
+
+
+# Metric checks: real databases and the real config
+
+def metric_results(dbs):
+    cfg = load_config(ORDERS)
+    source, target = dbs
+    src_side = {**cfg["source"], "path": source}
+    tgt_side = {**cfg["target"], "path": target}
+    src = run_profile(get_adapter(src_side), src_side, cfg)
+    tgt = run_profile(get_adapter(tgt_side), tgt_side, cfg)
+    return check_metrics(src, tgt, cfg["checks"]["metrics"])
+
+
+def test_clean_metrics_all_pass(clean_dbs):
+    results = metric_results(clean_dbs)
+    assert len(results) == 720
+    assert all(r.status == PASS for r in results)
+
+
+def test_timezone_bug_fails_metrics_and_names_extra_day(timezone_dbs):
+    results = metric_results(timezone_dbs)
+    assert any(r.status == FAIL and r.metric == "total_revenue" for r in results)
+    april = [r for r in results if r.partition == "2026-04-01"]
+    assert april and all(r.details == "partition only in target" for r in april)
