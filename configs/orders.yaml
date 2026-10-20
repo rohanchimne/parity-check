@@ -1,0 +1,47 @@
+dataset: orders
+tier: 1
+
+source:
+  engine: sqlite
+  path: data/source.db
+  table: orders
+
+target:
+  engine: duckdb
+  path: data/target.db
+  table: orders
+
+partition_column: order_date
+primary_key: [order_id]
+columns: [order_id, customer_id, order_ts, order_date, revenue, quantity, status, region]
+
+checks:
+  row_count:
+    tolerance: exact
+
+  schema:
+    type_map: sqlite_to_duckdb
+    require_nullability_match: true
+
+  metrics:
+    - name: total_revenue
+      expr: "SUM(revenue)"
+      tolerance: exact
+      scale: 2
+    - name: order_count
+      expr: "COUNT(*)"
+      tolerance: exact
+    - name: distinct_customers
+      expr: "COUNT(DISTINCT customer_id)"
+      tolerance: 0.001
+    - name: avg_order_value
+      expr: "SUM(revenue) / COUNT(*)"
+      tolerance: 0.001
+      by: [region]
+
+  freshness:
+    max_lag_days: 1
+
+gate:
+  consecutive_clean_runs: 3
+  settling_days: 2
