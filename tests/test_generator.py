@@ -3,28 +3,8 @@
 import sqlite3
 
 import duckdb
-import pytest
 
 import generate_data as gen
-
-
-def make_dbs(folder, inject):
-    """Build both databases in a folder, with the given bug injected into the target."""
-    df = gen.build_orders()
-    source, target = folder / "source.db", folder / "target.db"
-    gen.write_source(df, source)
-    gen.write_target(df, target, inject=inject)
-    return source, target
-
-
-@pytest.fixture(scope="module")
-def clean_dbs(tmp_path_factory):
-    return make_dbs(tmp_path_factory.mktemp("clean"), "none")
-
-
-@pytest.fixture(scope="module")
-def timezone_dbs(tmp_path_factory):
-    return make_dbs(tmp_path_factory.mktemp("timezone"), "timezone")
 
 
 def daily_source(path):
@@ -57,6 +37,13 @@ def daily_target(path):
     return {day: (count, cents) for day, count, cents in rows}
 
 
+def totals(daily):
+    """Whole-table (row count, revenue in cents), summed from the per-day numbers."""
+    rows = sum(count for count, _ in daily.values())
+    cents = sum(c for _, c in daily.values())
+    return rows, cents
+
+
 def test_clean_data_matches_every_day(clean_dbs):
     source, target = clean_dbs
     src = daily_source(source)
@@ -67,13 +54,6 @@ def test_clean_data_matches_every_day(clean_dbs):
 
 def test_generator_is_deterministic():
     assert gen.build_orders().equals(gen.build_orders())
-
-
-def totals(daily):
-    """Whole-table (row count, revenue in cents), summed from the per-day numbers."""
-    rows = sum(count for count, _ in daily.values())
-    cents = sum(c for _, c in daily.values())
-    return rows, cents
 
 
 def test_timezone_bug_keeps_totals_but_moves_days(timezone_dbs):
