@@ -1,0 +1,17 @@
+# Which DuckDB (target) types are acceptable for each SQLite (source) type.
+# A target type not listed here makes the schema check FAIL.
+
+INTEGER:
+  - INTEGER
+  - BIGINT
+
+TEXT:
+  - VARCHAR
+  - DATE
+  - TIMESTAMP
+
+NUMERIC:
+  - "DECIMAL(18,2)"
+
+REAL:
+  - DOUBLE
