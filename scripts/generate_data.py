@@ -1,5 +1,9 @@
 """Generate synthetic orders data for the parity-check demo."""
 
+import sqlite3
+from pathlib import Path
+
+import duckdb
 import numpy as np
 import pandas as pd
 
@@ -7,6 +11,10 @@ SEED = 42
 START_DATE = "2026-01-01"
 DAYS = 90
 BASE_ORDERS_PER_DAY = 5_000
+
+DATA_DIR = Path("data")
+SOURCE_PATH = DATA_DIR / "source.db"
+TARGET_PATH = DATA_DIR / "target.db"
 
 # Relative order volume by day of week: Monday=0 ... Sunday=6
 DAY_OF_WEEK_FACTOR = [0.90, 0.90, 0.95, 1.00, 1.15, 1.35, 1.25]
@@ -67,13 +75,81 @@ def build_orders(seed: int = SEED) -> pd.DataFrame:
     return df
 
 
-if __name__ == "__main__":
+def cents_to_text(cents: pd.Series) -> pd.Series:
+    """3499 -> '34.99'. Exact, no floating point involved."""
+    return cents.map(lambda c: f"{c // 100}.{c % 100:02d}")
+
+
+def write_source(df: pd.DataFrame, path: Path) -> None:
+    """The legacy system: SQLite, with timestamps and dates stored as text."""
+    path.unlink(missing_ok=True)
+    rows = list(zip(
+        df["order_id"].tolist(),
+        [None if pd.isna(c) else int(c) for c in df["customer_id"]],
+        df["order_ts"].dt.strftime("%Y-%m-%d %H:%M:%S").tolist(),
+        df["order_ts"].dt.strftime("%Y-%m-%d").tolist(),
+        cents_to_text(df["revenue_cents"]).tolist(),
+        df["quantity"].tolist(),
+        df["status"].tolist(),
+        df["region"].tolist(),
+    ))
+    con = sqlite3.connect(path)
+    con.execute("""
+        CREATE TABLE orders (
+            order_id    INTEGER PRIMARY KEY,
+            customer_id INTEGER,
+            order_ts    TEXT NOT NULL,
+            order_date  TEXT NOT NULL,
+            revenue     NUMERIC NOT NULL,
+            quantity    INTEGER NOT NULL,
+            status      TEXT NOT NULL,
+            region      TEXT NOT NULL
+        )
+    """)
+    con.executemany("INSERT INTO orders VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
+    con.commit()
+    con.close()
+
+
+def write_target(df: pd.DataFrame, path: Path) -> None:
+    """The new warehouse: DuckDB, with real TIMESTAMP, DATE and DECIMAL types."""
+    path.unlink(missing_ok=True)
+    Path(f"{path}.wal").unlink(missing_ok=True)
+    con = duckdb.connect(str(path))
+    con.register("orders_df", df.assign(revenue_text=cents_to_text(df["revenue_cents"])))
+    con.execute("""
+        CREATE TABLE orders (
+            order_id    BIGINT NOT NULL,
+            customer_id BIGINT,
+            order_ts    TIMESTAMP NOT NULL,
+            order_date  DATE NOT NULL,
+            revenue     DECIMAL(18,2) NOT NULL,
+            quantity    INTEGER NOT NULL,
+            status      VARCHAR NOT NULL,
+            region      VARCHAR NOT NULL
+        )
+    """)
+    con.execute("""
+        INSERT INTO orders
+        SELECT order_id,
+               customer_id,
+               order_ts,
+               CAST(order_ts AS DATE),
+               CAST(revenue_text AS DECIMAL(18,2)),
+               quantity, status, region
+        FROM orders_df
+        ORDER BY order_id
+    """)
+    con.close()
+
+
+def main() -> None:
     df = build_orders()
-    print(df.head(10))
-    print(f"\nrows: {len(df):,}")
-    print(f"days: {df['order_date'].nunique()}")
-    print(f"null customer_id: {df['customer_id'].isna().mean():.2%}")
-    print("\norders by hour:")
-    print(df["order_ts"].dt.hour.value_counts().sort_index())
-    print("\norders by day of week:")
-    print(df["order_ts"].dt.day_name().value_counts())
+    DATA_DIR.mkdir(exist_ok=True)
+    write_source(df, SOURCE_PATH)
+    write_target(df, TARGET_PATH)
+    print(f"wrote {len(df):,} orders to {SOURCE_PATH} and {TARGET_PATH}")
+
+
+if __name__ == "__main__":
+    main()
